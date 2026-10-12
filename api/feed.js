@@ -29,7 +29,7 @@ const FB_PAGE_ID = process.env.FB_PAGE_ID;
 const FB_TOKEN = process.env.FB_PAGE_TOKEN;
 
 const FETCH_TIMEOUT_MS = 7000;
-const UA = 'JamboShowHub/1.0 (+https://jamboshow.com)';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
 /* ------------------------------------------------------------------ *
  * Tiny tolerant XML helpers. Enough for Atom and RSS 2.0, no library. *
@@ -85,9 +85,14 @@ function toISO(v) {
  * Fetching                                                            *
  * ------------------------------------------------------------------ */
 
-async function getText(url) {
+async function getText(url, extraHeaders = {}) {
   const res = await fetch(url, {
-    headers: { 'user-agent': UA, accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*' },
+    headers: {
+      'user-agent': UA,
+      'accept': 'text/html,application/xhtml+xml,application/xml,application/rss+xml,application/atom+xml;q=0.9,*/*;q=0.8',
+      'accept-language': 'en-US,en;q=0.9',
+      ...extraHeaders,
+    },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -108,8 +113,7 @@ async function getJSON(url) {
  * Adapters. Each returns an array of normalized items.                *
  * ------------------------------------------------------------------ */
 
-async function youtube() {
-  const xml = await getText(`https://www.youtube.com/feeds/videos.xml?channel_id=${YT_CHANNEL_ID}`);
+function youtubeFromXml(xml) {
   return blocks(xml, 'entry').map((e) => {
     const id = text(e, 'yt:videoId') || text(e, 'id').split(':').pop();
     return {
@@ -123,6 +127,33 @@ async function youtube() {
       embed: `https://www.youtube.com/embed/${id}`,
     };
   });
+}
+
+async function youtube() {
+  const feedUrl = `https://www.youtube.com/feeds/videos.xml?channel_id=${YT_CHANNEL_ID}`;
+
+  // Strategy 1: direct fetch with a browser user-agent.
+  try {
+    const xml = await getText(feedUrl);
+    const items = youtubeFromXml(xml);
+    if (items.length) return items;
+  } catch (e) { /* fall through */ }
+
+  // Strategy 2: public RSS-to-XML proxies that fetch from a residential-like edge.
+  const proxies = [
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(feedUrl)}`,
+    `https://corsproxy.io/?url=${encodeURIComponent(feedUrl)}`,
+  ];
+  for (const p of proxies) {
+    try {
+      const xml = await getText(p);
+      const items = youtubeFromXml(xml);
+      if (items.length) return items;
+    } catch (e) { /* try next */ }
+  }
+
+  // All strategies failed.
+  throw new Error('YouTube feed unreachable (direct 404 and proxies failed)');
 }
 
 /* Generic RSS or Atom reader, used for whatever you point it at. */
